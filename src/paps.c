@@ -28,6 +28,10 @@
 #include <cairo/cairo-ps.h>
 #include <cairo/cairo-pdf.h>
 #include <cairo/cairo-svg.h>
+#ifdef HAVE_CUPS
+#include <cups/cups.h>
+#include <cups/ppd.h>
+#endif
 #include <errno.h>
 #include <langinfo.h>
 #include <stdlib.h>
@@ -103,6 +107,9 @@ typedef struct {
   const gchar *header_font_desc;
   gdouble lpi;
   gdouble cpi;
+#ifdef HAVE_CUPS
+  gboolean cups_mode;
+#endif
 } page_layout_t;
 
 typedef struct {
@@ -462,8 +469,8 @@ int main(int argc, char *argv[])
   PangoFontMetrics *metrics;
   int gutter_width = 40;
   int total_gutter_width;
-  double page_width = paper_sizes[0].width;
-  double page_height = paper_sizes[0].height;
+  double page_width = -1;
+  double page_height = -1;
   int do_tumble = -1;   /* -1 means not initialized */
   int do_duplex = -1;
   const gchar *header_font_desc = MAKE_FONT_NAME (HEADER_FONT_FAMILY, HEADER_FONT_SCALE);
@@ -476,6 +483,10 @@ int main(int argc, char *argv[])
   cairo_t *cr;
   cairo_surface_t *surface = NULL;
   double surface_page_width = 0, surface_page_height = 0;
+#ifdef HAVE_CUPS
+  gboolean cups_mode = FALSE;
+  gchar *page_owner = NULL, *title = NULL;
+#endif
 
   /* Set locale from environment */
   setlocale(LC_ALL, "");
@@ -489,7 +500,158 @@ int main(int argc, char *argv[])
 #if 0
   g_option_context_add_main_entries(ctxt, entries, NULL);
 #endif
-  
+
+#ifdef HAVE_CUPS
+  /* check if the process is being invoked as CUPS filter */
+  G_STMT_START
+    {
+      gchar *prgname = g_path_get_basename (argv[0]);
+      cups_option_t *cups_options = NULL;
+      ppd_file_t *ppd;
+      ppd_size_t *pagesize;
+      int num_options;
+      const char *val;
+
+      if (strncmp(prgname, "texttopaps", 10) == 0 ||
+	  getenv("CUPS_SERVER") != NULL)
+	{
+	  g_set_prgname(prgname);
+	  /* argument format should be job-id user title copies options [file] */
+	  cups_mode = TRUE;
+	  /* set default values */
+	  page_layout.lpi = 6.0L;
+	  page_layout.cpi = 10.0L;
+	  left_margin = 36;
+	  right_margin = 36;
+	  top_margin = 36;
+	  bottom_margin = 36;
+	  page_width = 612;
+	  page_height = 792;
+	  font = g_strdup(MAKE_FONT_NAME ("Courier", DEFAULT_FONT_SIZE));
+	  header_font_desc = g_strdup(MAKE_FONT_NAME ("Courier", HEADER_FONT_SCALE));
+	  do_stretch_chars = TRUE;
+
+	  if (argc < 6 || argc > 7)
+	    {
+	      fprintf(stderr, "ERROR: %s job-id user title copies options [file]\n", prgname);
+	      exit(1);
+	    }
+	  if (argc == 6)
+	    {
+	      filename_in = "stdin";
+	      IN = stdin;
+	    }
+	  else
+	    {
+	      filename_in = argv[6];
+	      if ((IN = fopen(filename_in, "rb")) == NULL)
+		{
+		  fprintf(stderr, "ERROR: unable to open print file -\n");
+		  exit(1);
+		}
+	    }
+	  title = argv[3];
+	  page_owner = argv[2];
+	  num_options = cupsParseOptions(argv[5], 0, &cups_options);
+
+	  if ((val = cupsGetOption("prettyprint", num_options, cups_options)) != NULL &&
+	      g_ascii_strcasecmp(val, "no") &&
+	      g_ascii_strcasecmp(val, "off") &&
+	      g_ascii_strcasecmp(val, "false"))
+	    {
+	      /* XXX: need to support the keywords highlighting */
+	    }
+	  ppd = ppdOpenFile(getenv("PPD"));
+	  ppdMarkDefaults(ppd);
+	  cupsMarkOptions(ppd, num_options, cups_options);
+
+	  if ((pagesize = ppdPageSize(ppd, NULL)) != NULL)
+	    {
+	      page_width = pagesize->width;
+	      page_height = pagesize->length;
+	      top_margin = pagesize->length - pagesize->top;
+	      bottom_margin = pagesize->bottom;
+	      left_margin = pagesize->left;
+	      right_margin = pagesize->width - pagesize->right;
+	    }
+
+	  if ((val = cupsGetOption("landscape", num_options, cups_options)) != NULL)
+	    {
+	      if (g_ascii_strcasecmp(val, "no") &&
+		  g_ascii_strcasecmp(val, "off") &&
+		  g_ascii_strcasecmp(val, "false"))
+		do_landscape = TRUE;
+	    }
+	  /* XXX: need to support orientation-requested? */
+	  if ((val = cupsGetOption("page-left", num_options, cups_options)) != NULL)
+	    {
+	      left_margin = (int)atof(val);
+	    }
+	  if ((val = cupsGetOption("page-right", num_options, cups_options)) != NULL)
+	    {
+	      right_margin = (int)atof(val);
+	    }
+	  if ((val = cupsGetOption("page-bottom", num_options, cups_options)) != NULL)
+	    {
+	      bottom_margin = (int)atof(val);
+	    }
+	  if ((val = cupsGetOption("page-top", num_options, cups_options)) != NULL)
+	    {
+	      top_margin = (int)atof(val);
+	    }
+	  if (ppdIsMarked(ppd, "Duplex", "DuplexNoTumble") ||
+	      ppdIsMarked(ppd, "Duplex", "DuplexTumble") ||
+	      ppdIsMarked(ppd, "JCLDuplex", "DuplexNoTumble") ||
+	      ppdIsMarked(ppd, "JCLDuplex", "DuplexTumble") ||
+	      ppdIsMarked(ppd, "EFDuplex", "DuplexNoTumble") ||
+	      ppdIsMarked(ppd, "EFDuplex", "DuplexTumble") ||
+	      ppdIsMarked(ppd, "KD03Duplex", "DuplexNoTumble") ||
+	      ppdIsMarked(ppd, "KD03Duplex", "DuplexTumble"))
+	    {
+	      do_duplex = TRUE;
+	    }
+	  if ((val = cupsGetOption("wrap", num_options, cups_options)) != NULL)
+	    {
+	      do_wordwrap = !g_ascii_strcasecmp(val, "true") ||
+		!g_ascii_strcasecmp(val, "on") ||
+		!g_ascii_strcasecmp(val, "yes");
+	    }
+	  if ((val = cupsGetOption("columns", num_options, cups_options)) != NULL)
+	    {
+	      num_columns = atoi(val);
+	    }
+	  if ((val = cupsGetOption("cpi", num_options, cups_options)) != NULL)
+	    {
+	      page_layout.cpi = atof(val);
+	    }
+	  if ((val = cupsGetOption("lpi", num_options, cups_options)) != NULL)
+	    {
+	      page_layout.lpi = atof(val);
+	    }
+	  if (getenv("CHARSET") != NULL)
+	    {
+	      const char *charset = getenv("CHARSET");
+	      /* Map CUPS charset names to real ones.
+	       * http://cups.org/newsgroups.php?s9797+gcups.general+v9797+T1
+	       */
+	      if (!g_ascii_strcasecmp(charset, "windows-932"))
+		{
+		  charset = "WINDOWS-31J";
+		}
+	      if (g_ascii_strcasecmp(charset, "utf-8") &&
+		  g_ascii_strcasecmp(charset, "utf8"))
+		{
+		  encoding = g_strdup(charset);
+		}
+	    }
+	}
+    }
+  G_STMT_END;
+
+  if (!cups_mode)
+    {
+#endif
+
   /* Parse command line */
   if (!g_option_context_parse(ctxt, &argc, &argv, &error))
     {
@@ -519,6 +681,10 @@ int main(int argc, char *argv[])
       IN = stdin;
     }
 
+#ifdef HAVE_CUPS
+    }
+#endif
+
   // For now always write to stdout
   if (output == NULL)
     output_fh = stdout;
@@ -533,8 +699,10 @@ int main(int argc, char *argv[])
     }
 
   /* Page layout */
-  page_width = paper_sizes[(int)paper_type].width;
-  page_height = paper_sizes[(int)paper_type].height;
+  if (page_width < 0)
+    page_width = paper_sizes[(int)paper_type].width;
+  if (page_height < 0)
+    page_height = paper_sizes[(int)paper_type].height;
   
   /* Swap width and height for landscape except for postscript */
   surface_page_width = page_width;
@@ -546,10 +714,31 @@ int main(int argc, char *argv[])
     }
         
   if (output_format == FORMAT_POSTSCRIPT)
-    surface = cairo_ps_surface_create_for_stream(&paps_cairo_write_func,
-                                                 NULL,
-                                                 surface_page_width,
-                                                 surface_page_height);
+    {
+      surface = cairo_ps_surface_create_for_stream(&paps_cairo_write_func,
+						   NULL,
+						   surface_page_width,
+						   surface_page_height);
+#ifdef HAVE_CUPS
+      G_STMT_START
+	{
+	  gchar *dsc;
+
+	  dsc = g_strdup_printf ("%%%%For: %s", page_owner);
+	  cairo_ps_surface_dsc_comment (surface, dsc);
+	  g_free (dsc);
+	  dsc = g_strdup_printf ("%%%%Title: %s", title);
+	  cairo_ps_surface_dsc_comment (surface, dsc);
+	  g_free (dsc);
+	  /* Put %%cupsRotation tag to prevent the rotation in pstops.
+	   * This breaks paps's behavior to make it in landscape say.
+	   * (rhbz#222137)
+	   */
+	  cairo_ps_surface_dsc_comment (surface, "%%cupsRotation: 0");
+	}
+      G_STMT_END;
+#endif
+    }
   else if (output_format == FORMAT_PDF)
     surface = cairo_pdf_surface_create_for_stream(&paps_cairo_write_func,
                                                   NULL,
@@ -644,6 +833,9 @@ int main(int argc, char *argv[])
   page_layout.pango_dir = pango_dir;
   page_layout.filename = filename_in;
   page_layout.header_font_desc = header_font_desc;
+#ifdef HAVE_CUPS
+  page_layout.cups_mode = cups_mode;
+#endif
 
   /* calculate x-coordinate scale */
   if (page_layout.cpi > 0.0L)
@@ -820,6 +1012,14 @@ split_text_into_paragraphs (cairo_t *cr,
           if (wc == (gunichar)-1)
             {
               fprintf (stderr, "%s: Invalid character in input\n", g_get_prgname ());
+#ifdef HAVE_CUPS
+	      if (page_layout->cups_mode)
+		{
+		  /* try to continue parsing text */
+		  p = next;
+		  continue;
+		}
+#endif
               wc = 0;
             }
           if (!*p || !wc || wc == '\n' || wc == '\f')
@@ -848,6 +1048,14 @@ split_text_into_paragraphs (cairo_t *cr,
 		      g_free (wtext);
 		      g_free (wnewtext);
 		      g_free (newtext);
+#ifdef HAVE_CUPS
+		      if (page_layout->cups_mode)
+			{
+			  /* try to continue parsing text */
+			  p = next;
+			  continue;
+			}
+#endif
 		      exit (1);
 		    }
 		  len = g_utf8_strlen (para->text, para->length);

@@ -15,4 +15,16 @@ AC_GNU_SOURCE
 PKG_PROG_PKG_CONFIG
 PKG_CHECK_MODULES([PANGO], [pangocairo pangoft2])
 
+dnl ======================================================
+dnl check for CUPS
+dnl ======================================================
+AC_PATH_PROG(CUPS_CONFIG, cups-config, no)
+if test "x$CUPS_CONFIG" != "xno"; then
+	CUPS_CFLAGS=`$CUPS_CONFIG --cflags | sed -e 's/-O[0-9]*//' -e 's/-m[^\t]*//g'`
+	CUPS_LIBS=`$CUPS_CONFIG --libs`
+	AC_DEFINE_UNQUOTED([HAVE_CUPS], [1], [CUPS support])
+fi
+AC_SUBST(CUPS_CFLAGS)
+AC_SUBST(CUPS_LIBS)
+
 AC_OUTPUT(Makefile src/Makefile)
